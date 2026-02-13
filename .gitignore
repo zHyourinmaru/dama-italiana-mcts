@@ -1,0 +1,72 @@
+# ========================
+# Build output
+# ========================
+out/
+build/
+cmake-build-*/
+
+# ========================
+# CMake generated files
+# ========================
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+.ninja_*
+
+# ========================
+# Visual Studio / MSVC
+# ========================
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+*.cachefile
+*.VC.db
+*.VC.opendb
+ipch/
+x64/
+x86/
+Debug/
+Release/
+
+# ========================
+# Compiled objects / binaries
+# ========================
+*.obj
+*.o
+*.a
+*.lib
+*.so
+*.dylib
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.log
+
+# ========================
+# OS files
+# ========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ========================
+# IDE / Editor
+# ========================
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace

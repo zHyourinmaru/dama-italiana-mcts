@@ -1,0 +1,446 @@
+/*
+ * mcts.c - Monte Carlo Tree Search with UCB1 and PUCT policies
+ *
+ * Key optimisations:
+ *   - Arena pool allocator (no malloc/free during search)
+ *   - No game-state cloning during rollout (stack copy at rollout start)
+ *   - Fast rollout with bitboard move generation
+ *   - Anytime: polls wall-clock every 128 iterations
+ *   - Endgame adjudication in rollout
+ */
+
+#include "mcts.h"
+#include "bitboard.h"
+#include "movegen.h"
+#include "game.h"
+
+#include <math.h>
+#include <string.h>
+#include <stdio.h>
+#include <float.h>
+
+#ifdef _WIN32
+#include <windows.h>
+static double get_time_sec(void) {
+    static LARGE_INTEGER freq = {0};
+    if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart / (double)freq.QuadPart;
+}
+#else
+#include <time.h>
+static double get_time_sec(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+#endif
+
+/* ------------------------------------------------------------------ */
+/*  Default configuration                                              */
+/* ------------------------------------------------------------------ */
+
+MCTSConfig mcts_default_config(void) {
+    MCTSConfig cfg;
+    cfg.policy      = POLICY_UCB1;
+    cfg.cp          = 1.41421356;    /* sqrt(2) */
+    cfg.cpuct       = 1.0;
+    cfg.time_limit  = 1.0;
+    cfg.max_rollout = 200;
+    cfg.rollout_material_cutoff = 3;
+    cfg.pool_capacity = 4000000;      /* ~4M nodes ≈ 256MB */
+    return cfg;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Fast RNG for rollouts                                              */
+/* ------------------------------------------------------------------ */
+
+static inline uint64_t xorshift64(uint64_t *s) {
+    uint64_t x = *s;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *s = x;
+    return x;
+}
+
+/* Random int in [0, n) */
+static inline int rand_int(uint64_t *rng, int n) {
+    return (int)(xorshift64(rng) % (uint64_t)n);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Node operations                                                    */
+/* ------------------------------------------------------------------ */
+
+static MCTSNode *node_alloc(MCTSSearch *search) {
+    return (MCTSNode *)pool_alloc(&search->node_pool);
+}
+
+static MCTSNode *node_alloc_children(MCTSSearch *search, int count) {
+    return (MCTSNode *)pool_alloc_array(&search->node_pool, (size_t)count);
+}
+
+static void node_init(MCTSNode *node, MCTSNode *parent, const Move *move) {
+    node->w = 0.0f;
+    node->n = 0;
+    node->n_children = 0;
+    node->n_untried  = 0;
+    node->children   = NULL;
+    node->parent     = parent;
+    if (move)
+        node->move = *move;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Selection policies                                                 */
+/* ------------------------------------------------------------------ */
+
+static double ucb1_score(const MCTSNode *child, double cp, double log_parent_n) {
+    if (child->n == 0) return DBL_MAX;
+    double exploitation = (double)child->w / (double)child->n;
+    double exploration  = cp * sqrt(log_parent_n / (double)child->n);
+    return exploitation + exploration;
+}
+
+static double puct_score(const MCTSNode *child, double cpuct,
+                         double sqrt_parent_n, int n_actions) {
+    double prior = 1.0 / (double)n_actions;  /* uniform prior */
+    double exploitation = (child->n > 0) ? ((double)child->w / (double)child->n) : 0.0;
+    double exploration  = cpuct * prior * sqrt_parent_n / (1.0 + (double)child->n);
+    return exploitation + exploration;
+}
+
+static MCTSNode *select_child(const MCTSSearch *search, MCTSNode *node) {
+    MCTSNode *best = NULL;
+    double best_score = -DBL_MAX;
+
+    if (search->cfg.policy == POLICY_UCB1) {
+        double log_N = log((double)node->n + 1.0);
+        for (int i = 0; i < node->n_children; i++) {
+            double score = ucb1_score(&node->children[i], search->cfg.cp, log_N);
+            if (score > best_score) {
+                best_score = score;
+                best = &node->children[i];
+            }
+        }
+    } else {
+        /* PUCT */
+        double sqrt_N = sqrt((double)node->n);
+        int n_actions = node->n_children;
+        for (int i = 0; i < node->n_children; i++) {
+            double score = puct_score(&node->children[i], search->cfg.cpuct,
+                                       sqrt_N, n_actions);
+            if (score > best_score) {
+                best_score = score;
+                best = &node->children[i];
+            }
+        }
+    }
+
+    return best;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Expansion                                                          */
+/* ------------------------------------------------------------------ */
+
+static bool expand_node(MCTSSearch *search, MCTSNode *node,
+                        const GameState *state) {
+    Move moves[MAX_MOVES];
+    int n = generate_moves(state, moves);
+    if (n == 0) return false;
+
+    /* Allocate children array from pool contiguously */
+    MCTSNode *children = node_alloc_children(search, n);
+    if (!children) return false;  /* pool exhausted */
+
+    for (int i = 0; i < n; i++) {
+        node_init(&children[i], node, &moves[i]);
+    }
+
+    node->children   = children;
+    node->n_children = (int16_t)n;
+    node->n_untried  = (int16_t)n;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Rollout (simulation)                                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Fast rollout: no state cloning (uses stack copy), heuristic termination.
+ *
+ * Returns score from WHITE's perspective: 1.0 = white wins, 0.0 = black, 0.5 = draw
+ */
+static float rollout(MCTSSearch *search, GameState state) {
+    Move moves[MAX_MOVES];
+    int depth = 0;
+    int max_depth = search->cfg.max_rollout;
+
+    while (depth < max_depth) {
+        /* Quick game-over check */
+        Bitboard own = (state.turn == WHITE) ? state.wp : state.bp;
+        if (own == 0) {
+            /* Side to move has no pieces */
+            return (state.turn == WHITE) ? 0.0f : 1.0f;
+        }
+
+        int n = generate_moves(&state, moves);
+        if (n == 0) {
+            /* No legal moves */
+            return (state.turn == WHITE) ? 0.0f : 1.0f;
+        }
+
+        /* Endgame adjudication: very few pieces left */
+        int total = popcount32(state.wp) + popcount32(state.bp);
+        if (total <= search->cfg.rollout_material_cutoff) {
+            /* Use material heuristic */
+            int score = game_material_score(&state);
+            if (score > 50) return 1.0f;
+            if (score < -50) return 0.0f;
+            return 0.5f;
+        }
+
+        /* 1K vs 1K → draw */
+        if (popcount32(state.wp) == 1 && popcount32(state.bp) == 1 &&
+            (state.k & state.wp) && (state.k & state.bp)) {
+            return 0.5f;
+        }
+
+        /* No-progress cutoff */
+        if (state.no_progress >= 60) {
+            return 0.5f;
+        }
+
+        /* Pick random move */
+        int idx = rand_int(&search->rng_state, n);
+        game_make_move_fast(&state, &moves[idx]);
+        depth++;
+    }
+
+    /* Exceeded max depth: evaluate by material */
+    int score = game_material_score(&state);
+    if (score > 30) return 1.0f;
+    if (score < -30) return 0.0f;
+    return 0.5f;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Backpropagation                                                    */
+/* ------------------------------------------------------------------ */
+
+static void backpropagate(MCTSNode *node, float result, Color root_turn) {
+    /*
+     * Walk from leaf back to root.
+     *
+     * Each node stores w/n from the perspective of the side that CHOSE
+     * the move leading to this node (i.e. the parent's turn at the time).
+     *
+     * At each depth d from root:
+     *   - even depth → root_turn moved to reach this node
+     *   - odd depth  → opponent moved to reach this node
+     *
+     * We count depth by walking up and alternating perspective.
+     * The leaf is the deepest, and tree depth increases by 1 at each child level.
+     */
+
+    /* First, count depth of the leaf from root */
+    int depth = 0;
+    for (MCTSNode *p = node; p->parent != NULL; p = p->parent)
+        depth++;
+
+    /* Now walk up from leaf to root */
+    MCTSNode *cur = node;
+    int d = depth;
+    while (cur != NULL) {
+        cur->n++;
+        if (cur->parent != NULL) {
+            /* d is the depth of this node. At depth d, the move was made by:
+             *   depth 1: root_turn, depth 2: opponent, depth 3: root_turn, ... */
+            Color mover = ((d % 2) == 1) ? root_turn : OPPONENT(root_turn);
+            float score = (mover == WHITE) ? result : (1.0f - result);
+            cur->w += score;
+        }
+        cur = cur->parent;
+        d--;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main MCTS search loop                                              */
+/* ------------------------------------------------------------------ */
+
+Move mcts_search(MCTSSearch *search, const GameState *state) {
+    double start_time = get_time_sec();
+    double deadline = start_time + search->cfg.time_limit;
+
+    /* Reset pool & create root */
+    pool_reset(&search->node_pool);
+    search->root = node_alloc(search);
+    node_init(search->root, NULL, NULL);
+    search->total_simulations = 0;
+    search->total_rollout_moves = 0;
+
+    /* Expand root immediately */
+    if (!expand_node(search, search->root, state)) {
+        /* No legal moves at root — shouldn't happen if game not over */
+        Move null_move;
+        memset(&null_move, 0, sizeof(null_move));
+        return null_move;
+    }
+
+    /* Initialize RNG */
+    if (search->rng_state == 0)
+        search->rng_state = 0xABCDEF0123456789ULL;
+
+    uint64_t iter = 0;
+    const int CHECK_INTERVAL = 128;
+
+    while (1) {
+        /* Time check every CHECK_INTERVAL iterations */
+        if ((iter & (CHECK_INTERVAL - 1)) == 0 && iter > 0) {
+            if (get_time_sec() >= deadline) break;
+        }
+
+        /* --- Selection --- */
+        MCTSNode *node = search->root;
+        GameState sim = *state;  /* one copy per iteration */
+
+        while (node->n_children > 0 && node->n_untried == 0) {
+            node = select_child(search, node);
+            game_make_move_fast(&sim, &node->move);
+        }
+
+        /* --- Expansion --- */
+        if (node->n > 0 && node->n_children == 0) {
+            /* Try to expand if not a terminal node */
+            GameResult res = game_result(&sim);
+            if (res == RESULT_ONGOING) {
+                if (expand_node(search, node, &sim)) {
+                    /* Pick first untried child */
+                    node->n_untried = node->n_children;  /* already set, but be safe */
+                    int idx = rand_int(&search->rng_state, node->n_children);
+                    node = &node->children[idx];
+                    node->parent->n_untried--;
+                    game_make_move_fast(&sim, &node->move);
+                }
+            } else {
+                /* Terminal node: score directly */
+                float score;
+                switch (res) {
+                    case RESULT_WHITE: score = 1.0f; break;
+                    case RESULT_BLACK: score = 0.0f; break;
+                    default:           score = 0.5f; break;
+                }
+                backpropagate(node, score, state->turn);
+                iter++;
+                search->total_simulations++;
+                continue;
+            }
+        } else if (node->n_untried > 0) {
+            /* Pick a random untried child */
+            int untried_idx = rand_int(&search->rng_state, node->n_untried);
+            int cnt = 0;
+            for (int i = 0; i < node->n_children; i++) {
+                if (node->children[i].n == 0) {
+                    if (cnt == untried_idx) {
+                        node = &node->children[i];
+                        node->parent->n_untried--;
+                        game_make_move_fast(&sim, &node->move);
+                        break;
+                    }
+                    cnt++;
+                }
+            }
+        }
+
+        /* --- Simulation (rollout) --- */
+        float result = rollout(search, sim);
+
+        /* --- Backpropagation --- */
+        backpropagate(node, result, state->turn);
+
+        iter++;
+        search->total_simulations++;
+    }
+
+    /* --- Choose best move: most visits --- */
+    MCTSNode *best = NULL;
+    uint32_t best_visits = 0;
+    for (int i = 0; i < search->root->n_children; i++) {
+        MCTSNode *child = &search->root->children[i];
+        if (child->n > best_visits) {
+            best_visits = child->n;
+            best = child;
+        }
+    }
+
+    double elapsed = get_time_sec() - start_time;
+
+    /* Print search stats */
+    double sps = (elapsed > 0) ? (double)search->total_simulations / elapsed : 0;
+    fprintf(stderr, "[MCTS] %llu sims in %.3fs (%.0f sims/s), pool: %.1f%%\n",
+            (unsigned long long)search->total_simulations, elapsed, sps,
+            pool_usage_pct(&search->node_pool));
+
+    if (best) {
+        float wr = (best->n > 0) ? best->w / (float)best->n : 0.0f;
+        fprintf(stderr, "[MCTS] Best move: %d->%d, visits=%u, winrate=%.1f%%\n",
+                best->move.from, best->move.to, best->n, wr * 100.0f);
+        return best->move;
+    }
+
+    Move null_move;
+    memset(&null_move, 0, sizeof(null_move));
+    return null_move;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Init / Destroy                                                     */
+/* ------------------------------------------------------------------ */
+
+bool mcts_init(MCTSSearch *search, const MCTSConfig *cfg) {
+    search->cfg = *cfg;
+    search->root = NULL;
+    search->total_simulations = 0;
+    search->total_rollout_moves = 0;
+    search->rng_state = 0xDEADBEEF42ULL;
+
+    return pool_init(&search->node_pool, sizeof(MCTSNode), cfg->pool_capacity);
+}
+
+void mcts_destroy(MCTSSearch *search) {
+    pool_destroy(&search->node_pool);
+    search->root = NULL;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Statistics                                                         */
+/* ------------------------------------------------------------------ */
+
+MCTSStats mcts_get_stats(const MCTSSearch *search) {
+    MCTSStats stats;
+    memset(&stats, 0, sizeof(stats));
+    stats.simulations = search->total_simulations;
+    stats.pool_usage  = pool_usage_pct(&search->node_pool);
+
+    if (search->root) {
+        MCTSNode *best = NULL;
+        uint32_t max_n = 0;
+        for (int i = 0; i < search->root->n_children; i++) {
+            if (search->root->children[i].n > max_n) {
+                max_n = search->root->children[i].n;
+                best = &search->root->children[i];
+            }
+        }
+        if (best) {
+            stats.best_visits  = best->n;
+            stats.best_winrate = (best->n > 0) ? best->w / (float)best->n : 0.0f;
+        }
+    }
+    return stats;
+}
