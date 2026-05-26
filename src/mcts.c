@@ -158,8 +158,65 @@ static bool expand_node(MCTSSearch *search, MCTSNode *node,
 /*
  * Fast rollout: no state cloning (uses stack copy), heuristic termination.
  *
+ * Move selection uses a BIASED policy instead of pure random:
+ *   - Captures are already mandatory (generate_moves enforces them), so
+ *     when the move list contains captures all moves are captures — no
+ *     extra logic is needed to prefer them.
+ *   - Among quiet moves, forward steps (toward promotion) are weighted 3x
+ *     vs backward steps (weight 1). King moves are weighted uniformly.
+ *
+ * This lightweight bias dramatically reduces the draw rate caused by
+ * fully-random rollouts wandering without progress, as required by the spec.
+ *
  * Returns score from WHITE's perspective: 1.0 = white wins, 0.0 = black, 0.5 = draw
  */
+
+/* Weighted move selection for rollout.
+ * Assigns each move an integer weight and samples proportionally using
+ * a single random number — O(n) with no extra allocation. */
+static int rollout_pick_move(uint64_t *rng, const Move *moves, int n,
+                             Color turn) {
+    /* Fast path: nothing to choose */
+    if (n == 1) return 0;
+
+    /* If moves are captures (n_captures > 0 on first move) use uniform
+     * selection — all captures are already priority-filtered by generate_moves,
+     * so they are equally desirable at the rollout level. */
+    if (moves[0].n_captures > 0)
+        return rand_int(rng, n);
+
+    /* Quiet moves: assign weights.
+     *   forward step  → weight 3   (toward promotion row)
+     *   backward step → weight 1
+     *   king move     → weight 2   (neutral: kings don't have a clear direction)
+     */
+    int weights[MAX_MOVES];
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        int w;
+        if (moves[i].is_king_move) {
+            w = 2;
+        } else {
+            int from_row = sq_to_row(moves[i].from);
+            int to_row   = sq_to_row(moves[i].to);
+            bool forward = (turn == WHITE) ? (to_row > from_row)
+                                           : (to_row < from_row);
+            w = forward ? 3 : 1;
+        }
+        weights[i] = w;
+        total += w;
+    }
+
+    /* Sample: pick a threshold in [0, total) then walk the weight array */
+    int r = (int)(xorshift64(rng) % (uint64_t)total);
+    int acc = 0;
+    for (int i = 0; i < n - 1; i++) {
+        acc += weights[i];
+        if (r < acc) return i;
+    }
+    return n - 1;
+}
+
 static float rollout(MCTSSearch *search, GameState state) {
     Move moves[MAX_MOVES];
     int depth = 0;
@@ -194,8 +251,8 @@ static float rollout(MCTSSearch *search, GameState state) {
             return 0.5f;
         }
 
-        /* Pick random move */
-        int idx = rand_int(&search->rng_state, n);
+        /* Pick move using biased rollout policy */
+        int idx = rollout_pick_move(&search->rng_state, moves, n, state.turn);
         game_make_move_fast(&state, &moves[idx]);
         depth++;
     }
