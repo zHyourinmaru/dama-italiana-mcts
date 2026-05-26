@@ -110,8 +110,8 @@ GameResult game_result(const GameState *s) {
         return (s->turn == WHITE) ? RESULT_BLACK : RESULT_WHITE;
     }
 
-    /* 80 half-move no-progress rule → draw */
-    if (s->no_progress >= 80) {
+    /* NO_PROGRESS_DRAW half-move no-progress rule → draw */
+    if (s->no_progress >= NO_PROGRESS_DRAW) {
         return RESULT_DRAW;
     }
 

@@ -211,8 +211,8 @@ static float rollout(MCTSSearch *search, GameState state) {
             return 0.5f;
         }
 
-        /* No-progress cutoff */
-        if (state.no_progress >= 60) {
+        /* No-progress cutoff (matches game_result rule) */
+        if (state.no_progress >= NO_PROGRESS_DRAW) {
             return 0.5f;
         }
 
