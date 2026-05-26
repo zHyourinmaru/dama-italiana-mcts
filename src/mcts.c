@@ -205,12 +205,6 @@ static float rollout(MCTSSearch *search, GameState state) {
             return 0.5f;
         }
 
-        /* 1K vs 1K → draw */
-        if (popcount32(state.wp) == 1 && popcount32(state.bp) == 1 &&
-            (state.k & state.wp) && (state.k & state.bp)) {
-            return 0.5f;
-        }
-
         /* No-progress cutoff (matches game_result rule) */
         if (state.no_progress >= NO_PROGRESS_DRAW) {
             return 0.5f;

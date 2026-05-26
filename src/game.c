@@ -120,14 +120,6 @@ GameResult game_result(const GameState *s) {
         return RESULT_DRAW;
     }
 
-    /* Endgame draw detection: 1K vs 1K */
-    int wp_count = popcount32(s->wp);
-    int bp_count = popcount32(s->bp);
-    if (wp_count == 1 && bp_count == 1 &&
-        (s->k & s->wp) && (s->k & s->bp)) {
-        return RESULT_DRAW;
-    }
-
     return RESULT_ONGOING;
 }
 
