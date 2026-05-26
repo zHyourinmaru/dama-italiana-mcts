@@ -210,43 +210,36 @@ static float rollout(MCTSSearch *search, GameState state) {
 /* ------------------------------------------------------------------ */
 /*  Backpropagation                                                    */
 /* ------------------------------------------------------------------ */
-
 static void backpropagate(MCTSNode *node, float result, Color root_turn) {
     /*
-     * Walk from leaf back to root.
+     * Walk from leaf back to root in two O(depth) passes (total O(2*depth)):
+     *   Pass 1: count depth to determine the leaf's mover parity.
+     *   Pass 2: walk up, updating n and w with alternating perspective.
      *
-     * Each node stores w/n from the perspective of the side that CHOSE
-     * the move leading to this node (i.e. the parent's turn at the time).
-     *
-     * At each depth d from root:
-     *   - even depth → root_turn moved to reach this node
-     *   - odd depth  → opponent moved to reach this node
-     *
-     * We count depth by walking up and alternating perspective.
-     * The leaf is the deepest, and tree depth increases by 1 at each child level.
+     * `result` is from WHITE's perspective (1.0 = white wins, 0.0 = black).
+     * Each node stores w from the perspective of the side that chose the move
+     * leading INTO this node (i.e. the parent's turn at that moment).
      */
+    float root_score = (root_turn == WHITE) ? result : (1.0f - result);
 
-    /* First, count depth of the leaf from root */
+    /* Pass 1: count depth from root */
     int depth = 0;
     for (MCTSNode *p = node; p->parent != NULL; p = p->parent)
         depth++;
 
-    /* Now walk up from leaf to root */
+    /* Pass 2: update — flip perspective at each level */
+    bool mover_is_root = ((depth % 2) == 1);
     MCTSNode *cur = node;
-    int d = depth;
     while (cur != NULL) {
         cur->n++;
         if (cur->parent != NULL) {
-            /* d is the depth of this node. At depth d, the move was made by:
-             *   depth 1: root_turn, depth 2: opponent, depth 3: root_turn, ... */
-            Color mover = ((d % 2) == 1) ? root_turn : OPPONENT(root_turn);
-            float score = (mover == WHITE) ? result : (1.0f - result);
-            cur->w += score;
+            cur->w += mover_is_root ? root_score : (1.0f - root_score);
         }
+        mover_is_root = !mover_is_root;
         cur = cur->parent;
-        d--;
     }
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Main MCTS search loop                                              */
