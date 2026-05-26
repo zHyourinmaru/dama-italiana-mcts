@@ -13,6 +13,7 @@
 #include "bitboard.h"
 #include "movegen.h"
 #include "game.h"
+#include "rng.h"
 
 #include <math.h>
 #include <string.h>
@@ -53,23 +54,6 @@ MCTSConfig mcts_default_config(void) {
     return cfg;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Fast RNG for rollouts                                              */
-/* ------------------------------------------------------------------ */
-
-static inline uint64_t xorshift64(uint64_t *s) {
-    uint64_t x = *s;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *s = x;
-    return x;
-}
-
-/* Random int in [0, n) */
-static inline int rand_int(uint64_t *rng, int n) {
-    return (int)(xorshift64(rng) % (uint64_t)n);
-}
 
 /* ------------------------------------------------------------------ */
 /*  Node operations                                                    */

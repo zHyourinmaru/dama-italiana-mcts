@@ -3,6 +3,7 @@
  */
 
 #include "bitboard.h"
+#include "rng.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -28,14 +29,6 @@ uint64_t zobrist_turn;
 /*  Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
-static uint64_t xorshift64(uint64_t *state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    return x;
-}
 
 /* ------------------------------------------------------------------ */
 /*  Initialisation                                                     */
