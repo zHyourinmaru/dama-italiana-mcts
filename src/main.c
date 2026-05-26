@@ -254,11 +254,34 @@ static int run_tuning(const AppArgs *args) {
     double best_cpuct = genetic_tune(&ga_puct);
     printf("Best PUCT Cpuct: %.4f\n\n", best_cpuct);
 
+    /* Phase 4: Sequential Halving (BAI) — principled best-arm identification */
+    printf("--- Phase 4: Sequential Halving BAI (UCB1 Cp) ---\n\n");
+    SeqHalvConfig sh_ucb1;
+    sh_ucb1.policy        = POLICY_UCB1;
+    sh_ucb1.param_min     = 0.1;
+    sh_ucb1.param_max     = 3.0;
+    sh_ucb1.n_candidates  = 8;   /* 3 rounds: 8→4→2→1 */
+    sh_ucb1.total_budget  = (args->games > 0) ? args->games * 4 : 32;
+    sh_ucb1.time_limit    = 0.2;
+    sh_ucb1.verbose       = args->verbose;
+
+    double sha_cp = seq_halving_tune(&sh_ucb1);
+    printf("Sequential Halving best UCB1 Cp: %.4f\n\n", sha_cp);
+
+    printf("--- Phase 4b: Sequential Halving BAI (PUCT Cpuct) ---\n\n");
+    SeqHalvConfig sh_puct = sh_ucb1;
+    sh_puct.policy = POLICY_PUCT;
+
+    double sha_cpuct = seq_halving_tune(&sh_puct);
+    printf("Sequential Halving best PUCT Cpuct: %.4f\n\n", sha_cpuct);
+
     /* Final summary */
     printf("========================================\n");
     printf("  TUNING RESULTS\n");
-    printf("  Best UCB1 Cp:    %.4f\n", best_cp);
-    printf("  Best PUCT Cpuct: %.4f\n", best_cpuct);
+    printf("  GA   UCB1 Cp:         %.4f\n", best_cp);
+    printf("  GA   PUCT Cpuct:      %.4f\n", best_cpuct);
+    printf("  SHA  UCB1 Cp:         %.4f\n", sha_cp);
+    printf("  SHA  PUCT Cpuct:      %.4f\n", sha_cpuct);
     printf("========================================\n");
 
     return 0;
