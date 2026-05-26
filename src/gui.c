@@ -191,7 +191,7 @@ static void gui_ai_turn(GUIApp *app) {
     app->ai_thinking = true;
     gui_render(app);  /* Show "thinking" state before blocking */
 
-    Move best = mcts_search(&app->search, &app->state);
+    Move best = mcts_search(&app->search, &app->state, &app->history);
     
     MCTSStats stats = mcts_get_stats(&app->search);
     snprintf(app->ai_last_stats, sizeof(app->ai_last_stats),

@@ -431,7 +431,7 @@ static int run_tests(void) {
 
         MCTSSearch search;
         mcts_init(&search, &cfg);
-        Move m = mcts_search(&search, &s);
+        Move m = mcts_search(&search, &s, NULL);
         mcts_destroy(&search);
 
         printf("Test 9 - MCTS produces a move (%d->%d) ... ", m.from, m.to);

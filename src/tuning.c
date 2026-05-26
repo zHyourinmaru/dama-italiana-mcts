@@ -50,7 +50,7 @@ SelfPlayResult selfplay_game(const MCTSConfig *white_cfg,
     while (res == RESULT_ONGOING && state.ply < max_game_ply) {
         MCTSSearch *current_search = (state.turn == WHITE) ? &white_search : &black_search;
 
-        Move best = mcts_search(current_search, &state);
+        Move best = mcts_search(current_search, &state, &history);
 
         if (state.turn == WHITE)
             result.white_sims += current_search->total_simulations;

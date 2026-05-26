@@ -302,7 +302,7 @@ static void backpropagate(MCTSNode *node, float result, Color root_turn) {
 /*  Main MCTS search loop                                              */
 /* ------------------------------------------------------------------ */
 
-Move mcts_search(MCTSSearch *search, const GameState *state) {
+Move mcts_search(MCTSSearch *search, const GameState *state, const HashHistory *history) {
     double start_time = get_time_sec();
     double deadline = start_time + search->cfg.time_limit;
 
@@ -338,9 +338,46 @@ Move mcts_search(MCTSSearch *search, const GameState *state) {
         MCTSNode *node = search->root;
         GameState sim = *state;  /* one copy per iteration */
 
+        /* Track path hashes to detect repetitions during selection */
+        uint64_t path_hashes[MAX_PLY];
+        int path_len = 0;
+        path_hashes[path_len++] = sim.hash;
+        bool is_repetition_draw = false;
+
         while (node->n_children > 0 && node->n_untried == 0) {
             node = select_child(search, node);
             game_make_move_fast(&sim, &node->move);
+
+            if (path_len < MAX_PLY) {
+                path_hashes[path_len++] = sim.hash;
+            }
+
+            /* Count occurrences of sim.hash */
+            int rep_count = 0;
+            if (history) {
+                rep_count += hash_history_count(history, sim.hash);
+            }
+            for (int i = 0; i < path_len; i++) {
+                if (path_hashes[i] == sim.hash) {
+                    rep_count++;
+                }
+            }
+
+            /* If it has appeared 3 times in total (real history + current path), it's a draw */
+            if (rep_count >= 3) {
+                is_repetition_draw = true;
+                break;
+            }
+        }
+
+        float result = 0.5f;
+
+        if (is_repetition_draw) {
+            result = 0.5f;
+            backpropagate(node, result, state->turn);
+            iter++;
+            search->total_simulations++;
+            continue;
         }
 
         /* --- Expansion --- */
@@ -387,7 +424,7 @@ Move mcts_search(MCTSSearch *search, const GameState *state) {
         }
 
         /* --- Simulation (rollout) --- */
-        float result = rollout(search, sim);
+        result = rollout(search, sim);
 
         /* --- Backpropagation --- */
         backpropagate(node, result, state->turn);
