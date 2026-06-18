@@ -18,6 +18,7 @@ typedef struct MCTSNode {
     float              w;              /* cumulative score (from this node's perspective) */
     uint32_t           n;              /* visit count                    */
     Move               move;           /* move that led to this node     */
+    float              prior;          /* PUCT prior probability          */
     int16_t            n_children;     /* number of children             */
     int16_t            n_untried;      /* children not yet expanded      */
     struct MCTSNode   *children;       /* array allocated from pool      */
@@ -54,6 +55,9 @@ typedef struct {
     uint64_t    total_rollout_moves;
     /* XorShift RNG state for rollouts */
     uint64_t    rng_state;
+    /* Last search timing (filled by mcts_search) */
+    double      last_elapsed;
+    double      last_sps;
 } MCTSSearch;
 
 /* ------------------------------------------------------------------ */

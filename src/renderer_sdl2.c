@@ -54,6 +54,11 @@ typedef struct {
     TTF_Font     *font_large;
     int           width;
     int           height;
+    /* Menu button hit areas */
+    SDL_Rect      btn_ucb1, btn_puct;
+    SDL_Rect      btn_t02, btn_t1, btn_t3;
+    SDL_Rect      btn_side;
+    SDL_Rect      btn_newgame;
 } SDL2Backend;
 
 /* ------------------------------------------------------------------ */
@@ -359,11 +364,7 @@ static void sdl2_draw_status(Renderer *self, const char *text) {
 /*  Menu rendering: buttons for policy, time, side, new game           */
 /* ------------------------------------------------------------------ */
 
-/* Store button rects for hit testing */
-static SDL_Rect btn_ucb1, btn_puct;
-static SDL_Rect btn_t02, btn_t1, btn_t3;
-static SDL_Rect btn_side;
-static SDL_Rect btn_newgame;
+/* Menu buttons are stored in the SDL2Backend struct for hit testing */
 
 static void sdl2_draw_menu(Renderer *self, PolicyType policy, int time_idx,
                            Color human_side) {
@@ -383,9 +384,9 @@ static void sdl2_draw_menu(Renderer *self, PolicyType policy, int time_idx,
         render_text(b, "Policy:", x, y1 + bh / 2, CLR_TEXT, b->font_small, false);
     }
     x = 80;
-    btn_ucb1 = draw_button(b, "UCB1", x, y1, bw, bh, policy == POLICY_UCB1);
+    b->btn_ucb1 = draw_button(b, "UCB1", x, y1, bw, bh, policy == POLICY_UCB1);
     x += bw + gap;
-    btn_puct = draw_button(b, "PUCT", x, y1, bw, bh, policy == POLICY_PUCT);
+    b->btn_puct = draw_button(b, "PUCT", x, y1, bw, bh, policy == POLICY_PUCT);
 
     /* Row 2: Time budget */
     x = 10;
@@ -393,18 +394,18 @@ static void sdl2_draw_menu(Renderer *self, PolicyType policy, int time_idx,
         render_text(b, "Time:", x, y2 + bh / 2, CLR_TEXT, b->font_small, false);
     }
     x = 80;
-    btn_t02 = draw_button(b, "0.2s", x, y2, bw, bh, time_idx == 0);
+    b->btn_t02 = draw_button(b, "0.2s", x, y2, bw, bh, time_idx == 0);
     x += bw + gap;
-    btn_t1 = draw_button(b, "1.0s", x, y2, bw, bh, time_idx == 1);
+    b->btn_t1 = draw_button(b, "1.0s", x, y2, bw, bh, time_idx == 1);
     x += bw + gap;
-    btn_t3 = draw_button(b, "3.0s", x, y2, bw, bh, time_idx == 2);
+    b->btn_t3 = draw_button(b, "3.0s", x, y2, bw, bh, time_idx == 2);
 
     /* Row 3: Side + New Game */
     x = 10;
     const char *side_label = (human_side == WHITE) ? "You: White" : "You: Black";
-    btn_side = draw_button(b, side_label, x, y3, 100, bh, false);
+    b->btn_side = draw_button(b, side_label, x, y3, 100, bh, false);
     x = 120;
-    btn_newgame = draw_button(b, "New Game", x, y3, 100, bh, false);
+    b->btn_newgame = draw_button(b, "New Game", x, y3, 100, bh, false);
 
     /* Separator line */
     SDL_SetRenderDrawColor(b->sdl_renderer, 80, 80, 90, 255);
@@ -442,25 +443,25 @@ static InputEvent sdl2_poll_event(Renderer *self) {
 
                 /* Check menu buttons */
                 SDL_Point pt = { mx, my };
-                if (SDL_PointInRect(&pt, &btn_ucb1)) {
+                if (SDL_PointInRect(&pt, &b->btn_ucb1)) {
                     ev.type = INPUT_MENU_POLICY; ev.value = POLICY_UCB1; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_puct)) {
+                if (SDL_PointInRect(&pt, &b->btn_puct)) {
                     ev.type = INPUT_MENU_POLICY; ev.value = POLICY_PUCT; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_t02)) {
+                if (SDL_PointInRect(&pt, &b->btn_t02)) {
                     ev.type = INPUT_MENU_TIME; ev.value = 0; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_t1)) {
+                if (SDL_PointInRect(&pt, &b->btn_t1)) {
                     ev.type = INPUT_MENU_TIME; ev.value = 1; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_t3)) {
+                if (SDL_PointInRect(&pt, &b->btn_t3)) {
                     ev.type = INPUT_MENU_TIME; ev.value = 2; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_side)) {
+                if (SDL_PointInRect(&pt, &b->btn_side)) {
                     ev.type = INPUT_MENU_SIDE; return ev;
                 }
-                if (SDL_PointInRect(&pt, &btn_newgame)) {
+                if (SDL_PointInRect(&pt, &b->btn_newgame)) {
                     ev.type = INPUT_MENU_NEWGAME; return ev;
                 }
 
