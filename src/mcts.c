@@ -70,6 +70,7 @@ static MCTSNode *node_alloc_children(MCTSSearch *search, int count) {
 static void node_init(MCTSNode *node, MCTSNode *parent, const Move *move) {
     node->w = 0.0f;
     node->n = 0;
+    node->prior = 0.0f;
     node->n_children = 0;
     node->n_untried  = 0;
     node->children   = NULL;
@@ -90,10 +91,9 @@ static double ucb1_score(const MCTSNode *child, double cp, double log_parent_n) 
 }
 
 static double puct_score(const MCTSNode *child, double cpuct,
-                         double sqrt_parent_n, int n_actions) {
-    double prior = 1.0 / (double)n_actions;  /* uniform prior */
+                         double sqrt_parent_n) {
     double exploitation = (child->n > 0) ? ((double)child->w / (double)child->n) : 0.0;
-    double exploration  = cpuct * prior * sqrt_parent_n / (1.0 + (double)child->n);
+    double exploration  = cpuct * (double)child->prior * sqrt_parent_n / (1.0 + (double)child->n);
     return exploitation + exploration;
 }
 
@@ -113,10 +113,9 @@ static MCTSNode *select_child(const MCTSSearch *search, MCTSNode *node) {
     } else {
         /* PUCT */
         double sqrt_N = sqrt((double)node->n);
-        int n_actions = node->n_children;
         for (int i = 0; i < node->n_children; i++) {
             double score = puct_score(&node->children[i], search->cfg.cpuct,
-                                       sqrt_N, n_actions);
+                                       sqrt_N);
             if (score > best_score) {
                 best_score = score;
                 best = &node->children[i];
@@ -127,9 +126,41 @@ static MCTSNode *select_child(const MCTSSearch *search, MCTSNode *node) {
     return best;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Expansion                                                          */
-/* ------------------------------------------------------------------ */
+/*
+ * Compute a heuristic prior for PUCT.
+ *
+ * Instead of a uniform 1/N prior, we assign domain-specific weights:
+ *   - Captures          → high priority  (base 4.0 + bonus per piece captured)
+ *   - Promotion moves   → medium-high    (3.0)
+ *   - Forward advances  → medium         (2.0)
+ *   - King moves        → slightly above neutral (1.5)
+ *   - Other moves       → baseline       (1.0)
+ *
+ * Weights are normalised to sum to 1 across all siblings.
+ */
+static float compute_heuristic_prior(const Move *move, Color turn) {
+    float weight = 1.0f;
+
+    if (move->n_captures > 0) {
+        /* Captures: more captured pieces = higher weight */
+        weight = 4.0f + (float)move->n_captures;
+    } else if (move->promotion) {
+        /* Reaching the promotion row is very valuable */
+        weight = 3.0f;
+    } else if (move->is_king_move) {
+        /* King moves are flexible */
+        weight = 1.5f;
+    } else {
+        /* Men quiet moves: prefer advancing toward promotion */
+        int from_row = sq_to_row(move->from);
+        int to_row   = sq_to_row(move->to);
+        bool forward = (turn == WHITE) ? (to_row > from_row)
+                                       : (to_row < from_row);
+        weight = forward ? 2.0f : 1.0f;
+    }
+
+    return weight;
+}
 
 static bool expand_node(MCTSSearch *search, MCTSNode *node,
                         const GameState *state) {
@@ -143,6 +174,26 @@ static bool expand_node(MCTSSearch *search, MCTSNode *node,
 
     for (int i = 0; i < n; i++) {
         node_init(&children[i], node, &moves[i]);
+    }
+
+    /* Compute and assign PUCT priors (normalised heuristic weights) */
+    if (search->cfg.policy == POLICY_PUCT) {
+        float total_weight = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float w = compute_heuristic_prior(&moves[i], state->turn);
+            children[i].prior = w;
+            total_weight += w;
+        }
+        /* Normalise so priors sum to 1 */
+        if (total_weight > 0.0f) {
+            for (int i = 0; i < n; i++)
+                children[i].prior /= total_weight;
+        }
+    } else {
+        /* UCB1: uniform prior (not used, but set for completeness) */
+        float uniform = (n > 0) ? 1.0f / (float)n : 0.0f;
+        for (int i = 0; i < n; i++)
+            children[i].prior = uniform;
     }
 
     node->children   = children;
@@ -448,6 +499,8 @@ Move mcts_search(MCTSSearch *search, const GameState *state, const HashHistory *
 
     /* Print search stats */
     double sps = (elapsed > 0) ? (double)search->total_simulations / elapsed : 0;
+    search->last_elapsed = elapsed;
+    search->last_sps     = sps;
     fprintf(stderr, "[MCTS] %llu sims in %.3fs (%.0f sims/s), pool: %.1f%%\n",
             (unsigned long long)search->total_simulations, elapsed, sps,
             pool_usage_pct(&search->node_pool));
@@ -474,6 +527,8 @@ bool mcts_init(MCTSSearch *search, const MCTSConfig *cfg) {
     search->total_simulations = 0;
     search->total_rollout_moves = 0;
     search->rng_state = 0xDEADBEEF42ULL;
+    search->last_elapsed = 0.0;
+    search->last_sps     = 0.0;
 
     return pool_init(&search->node_pool, sizeof(MCTSNode), cfg->pool_capacity);
 }
@@ -490,8 +545,10 @@ void mcts_destroy(MCTSSearch *search) {
 MCTSStats mcts_get_stats(const MCTSSearch *search) {
     MCTSStats stats;
     memset(&stats, 0, sizeof(stats));
-    stats.simulations = search->total_simulations;
-    stats.pool_usage  = pool_usage_pct(&search->node_pool);
+    stats.simulations  = search->total_simulations;
+    stats.elapsed      = search->last_elapsed;
+    stats.sims_per_sec = search->last_sps;
+    stats.pool_usage   = pool_usage_pct(&search->node_pool);
 
     if (search->root) {
         MCTSNode *best = NULL;
