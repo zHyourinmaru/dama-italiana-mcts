@@ -20,6 +20,7 @@
 #define MAX_MOVES       48      /* generous upper bound per position    */
 #define MAX_CAPTURES    12      /* max pieces captured in one sequence  */
 #define MAX_PLY         400     /* safety cap for game length           */
+#define NO_PROGRESS_DRAW 80     /* half-moves without capture/promotion → draw */
 
 /* ------------------------------------------------------------------ */
 /*  Fundamental types                                                  */

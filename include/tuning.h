@@ -83,4 +83,34 @@ SelfPlayResult selfplay_game(const MCTSConfig *white_cfg,
                              const MCTSConfig *black_cfg,
                              bool verbose);
 
+/* ------------------------------------------------------------------ */
+/*  Sequential Halving — BAI-style tuner                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sequential Halving (Karnin et al., 2013) is a Best-Arm Identification
+ * algorithm that provably minimises the sample complexity for finding the
+ * best arm with fixed confidence.
+ *
+ * Each round allocates an equal share of the total budget to the surviving
+ * candidates, evaluates them, then discards the bottom half. The last
+ * surviving candidate is returned as the best parameter value.
+ *
+ * Requires: candidates array of at least n_candidates doubles, all within
+ * [param_min, param_max].  If candidates is NULL, n_candidates equally-spaced
+ * values in [param_min, param_max] are generated automatically.
+ */
+typedef struct {
+    PolicyType  policy;          /* which policy to tune (UCB1 or PUCT)  */
+    double      param_min;       /* parameter search range lower bound    */
+    double      param_max;       /* parameter search range upper bound    */
+    int         n_candidates;    /* number of initial arms (power of 2 recommended) */
+    int         total_budget;    /* total number of games across all rounds */
+    double      time_limit;      /* seconds per MCTS search               */
+    bool        verbose;
+} SeqHalvConfig;
+
+/* Run Sequential Halving; returns the best parameter value found. */
+double seq_halving_tune(const SeqHalvConfig *cfg);
+
 #endif /* TUNING_H */

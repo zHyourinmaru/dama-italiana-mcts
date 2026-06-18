@@ -45,6 +45,7 @@ typedef struct {
     /* Flags */
     bool            running;
     bool            ai_thinking;
+    char            ai_last_stats[128];
 } GUIApp;
 
 /* ------------------------------------------------------------------ */

@@ -50,7 +50,7 @@ SelfPlayResult selfplay_game(const MCTSConfig *white_cfg,
     while (res == RESULT_ONGOING && state.ply < max_game_ply) {
         MCTSSearch *current_search = (state.turn == WHITE) ? &white_search : &black_search;
 
-        Move best = mcts_search(current_search, &state);
+        Move best = mcts_search(current_search, &state, &history);
 
         if (state.turn == WHITE)
             result.white_sims += current_search->total_simulations;
@@ -325,4 +325,127 @@ double genetic_tune(const GeneticConfig *cfg) {
 
     free(pop);
     return best_overall_param;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Sequential Halving — BAI-style tuner                               */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sequential Halving (Karnin, Koren & Somekh, ICML 2013).
+ *
+ * Algorithm:
+ *   Given k candidates and total budget T:
+ *   - Number of rounds R = ceil(log2(k))
+ *   - In round r (0-indexed), evaluate each surviving arm with
+ *       n_r = floor(T / (|S_r| * R))  games
+ *   - Eliminate the bottom half of survivors by score
+ *   - Return the last surviving arm
+ *
+ * Each arm's score is: wins + 0.5*draws  (same as tournament scoring).
+ * Games alternate colours to cancel first-move advantage.
+ */
+
+/* Compare function for qsort on (param, score) pairs — descending score */
+typedef struct { double param; double score; } Arm;
+
+static int arm_cmp_desc(const void *a, const void *b) {
+    double sa = ((const Arm *)a)->score;
+    double sb = ((const Arm *)b)->score;
+    if (sa > sb) return -1;
+    if (sa < sb) return  1;
+    return 0;
+}
+
+static double evaluate_arm(double param, const SeqHalvConfig *cfg,
+                            int n_games) {
+    MCTSConfig test_cfg = mcts_default_config();
+    test_cfg.policy     = cfg->policy;
+    test_cfg.time_limit = cfg->time_limit;
+    if (cfg->policy == POLICY_UCB1) test_cfg.cp    = param;
+    else                            test_cfg.cpuct = param;
+
+    MCTSConfig baseline  = mcts_default_config();
+    baseline.policy      = cfg->policy;
+    baseline.time_limit  = cfg->time_limit;
+
+    double score = 0.0;
+    for (int g = 0; g < n_games; g++) {
+        bool test_is_white = (g % 2 == 0);
+        MCTSConfig *w = test_is_white ? &test_cfg : &baseline;
+        MCTSConfig *b = test_is_white ? &baseline  : &test_cfg;
+
+        SelfPlayResult res = selfplay_game(w, b, false);
+
+        if (test_is_white) {
+            if      (res.result == RESULT_WHITE) score += 1.0;
+            else if (res.result == RESULT_DRAW)  score += 0.5;
+        } else {
+            if      (res.result == RESULT_BLACK) score += 1.0;
+            else if (res.result == RESULT_DRAW)  score += 0.5;
+        }
+    }
+    return score;
+}
+
+double seq_halving_tune(const SeqHalvConfig *cfg) {
+    int k = cfg->n_candidates;
+    if (k < 2) k = 2;
+
+    /* ceil(log2(k)) rounds */
+    int rounds = 0;
+    { int tmp = k - 1; while (tmp > 0) { rounds++; tmp >>= 1; } }
+    if (rounds < 1) rounds = 1;
+
+    printf("========================================\n");
+    printf(" Sequential Halving BAI (%s)\n",
+           cfg->policy == POLICY_UCB1 ? "UCB1 Cp" : "PUCT Cpuct");
+    printf(" Candidates: %d  Rounds: %d  Budget: %d games\n\n",
+           k, rounds, cfg->total_budget);
+
+    /* Build initial arm set: k equally-spaced values in [param_min, param_max] */
+    Arm *arms = (Arm *)malloc((size_t)k * sizeof(Arm));
+    for (int i = 0; i < k; i++) {
+        double t = (k == 1) ? 0.5
+                             : (double)i / (double)(k - 1);
+        arms[i].param = cfg->param_min + t * (cfg->param_max - cfg->param_min);
+        arms[i].score = 0.0;
+    }
+
+    int survivors = k;
+
+    for (int r = 0; r < rounds && survivors > 1; r++) {
+        /* Games per arm this round */
+        int n_games = cfg->total_budget / (survivors * rounds);
+        if (n_games < 1) n_games = 1;
+
+        printf("  Round %d/%d — %d survivors, %d games each\n",
+               r + 1, rounds, survivors, n_games);
+
+        /* Evaluate each surviving arm */
+        for (int i = 0; i < survivors; i++) {
+            arms[i].score = evaluate_arm(arms[i].param, cfg, n_games);
+            if (cfg->verbose)
+                printf("    param=%.4f  score=%.1f\n",
+                       arms[i].param, arms[i].score);
+        }
+
+        /* Sort descending by score */
+        qsort(arms, (size_t)survivors, sizeof(Arm), arm_cmp_desc);
+
+        /* Keep top half (round up so we always keep at least 1) */
+        int keep = (survivors + 1) / 2;
+        printf("  Keeping top %d: ", keep);
+        for (int i = 0; i < keep; i++)
+            printf("%.4f(%.1f)%s", arms[i].param, arms[i].score,
+                   i < keep - 1 ? ", " : "\n");
+
+        survivors = keep;
+    }
+
+    double best = arms[0].param;
+    printf("\n  Sequential Halving best: %.4f\n\n", best);
+
+    free(arms);
+    return best;
 }

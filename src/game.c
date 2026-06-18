@@ -110,21 +110,13 @@ GameResult game_result(const GameState *s) {
         return (s->turn == WHITE) ? RESULT_BLACK : RESULT_WHITE;
     }
 
-    /* 80 half-move no-progress rule → draw */
-    if (s->no_progress >= 80) {
+    /* NO_PROGRESS_DRAW half-move no-progress rule → draw */
+    if (s->no_progress >= NO_PROGRESS_DRAW) {
         return RESULT_DRAW;
     }
 
     /* Total ply cap → draw (prevents infinite games) */
     if (s->ply >= MAX_PLY) {
-        return RESULT_DRAW;
-    }
-
-    /* Endgame draw detection: 1K vs 1K */
-    int wp_count = popcount32(s->wp);
-    int bp_count = popcount32(s->bp);
-    if (wp_count == 1 && bp_count == 1 &&
-        (s->k & s->wp) && (s->k & s->bp)) {
         return RESULT_DRAW;
     }
 

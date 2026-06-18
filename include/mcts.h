@@ -7,6 +7,8 @@
 
 #include "types.h"
 #include "pool.h"
+#include "game.h"
+
 
 /* ------------------------------------------------------------------ */
 /*  MCTS Node                                                          */
@@ -62,7 +64,7 @@ typedef struct {
 bool mcts_init(MCTSSearch *search, const MCTSConfig *cfg);
 
 /* Run MCTS from given state; returns best move */
-Move mcts_search(MCTSSearch *search, const GameState *state);
+Move mcts_search(MCTSSearch *search, const GameState *state, const HashHistory *history);
 
 /* Free all resources */
 void mcts_destroy(MCTSSearch *search);

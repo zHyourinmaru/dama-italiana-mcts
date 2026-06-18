@@ -52,6 +52,7 @@ typedef struct {
     int         population;
     int         generations;
     bool        verbose;
+    char       *output_file;
 } AppArgs;
 
 static AppArgs parse_args(int argc, char **argv) {
@@ -65,6 +66,7 @@ static AppArgs parse_args(int argc, char **argv) {
     args.population  = 8;
     args.generations = 5;
     args.verbose     = false;
+    args.output_file = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
@@ -100,6 +102,9 @@ static AppArgs parse_args(int argc, char **argv) {
         else if (strcmp(argv[i], "--verbose") == 0) {
             args.verbose = true;
         }
+        else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+            args.output_file = argv[++i];
+        }
         else if (strcmp(argv[i], "--help") == 0) {
             printf("Dama Italiana - MCTS AI Player\n\n");
             printf("Usage: dama_italiana [options]\n\n");
@@ -112,6 +117,7 @@ static AppArgs parse_args(int argc, char **argv) {
             printf("  --population <int>                GA population (default: 8)\n");
             printf("  --generations <int>               GA generations (default: 5)\n");
             printf("  --verbose                         Verbose output\n");
+            printf("  --output <file.csv>               Export results to CSV\n");
             exit(0);
         }
     }
@@ -194,6 +200,20 @@ static int run_selfplay(const AppArgs *args) {
                result_str, res.total_moves,
                (unsigned long long)res.white_sims,
                (unsigned long long)res.black_sims);
+               
+        if (args->output_file) {
+            FILE *f = fopen(args->output_file, g == 0 ? "w" : "a");
+            if (f) {
+                if (g == 0) {
+                    fprintf(f, "game,result,total_moves,white_sims,black_sims,sims_per_sec\n");
+                }
+                double sps = (res.white_sims + res.black_sims) / (args->time_limit * 2.0 * (res.total_moves/2.0+1));
+                fprintf(f, "%d,%s,%d,%llu,%llu,%.1f\n",
+                        g+1, result_str, res.total_moves, 
+                        (unsigned long long)res.white_sims, (unsigned long long)res.black_sims, sps);
+                fclose(f);
+            }
+        }
     }
 
     printf("\nResults: White=%d Black=%d Draw=%d\n", w_wins, b_wins, draws);
@@ -254,12 +274,47 @@ static int run_tuning(const AppArgs *args) {
     double best_cpuct = genetic_tune(&ga_puct);
     printf("Best PUCT Cpuct: %.4f\n\n", best_cpuct);
 
+    /* Phase 4: Sequential Halving (BAI) — principled best-arm identification */
+    printf("--- Phase 4: Sequential Halving BAI (UCB1 Cp) ---\n\n");
+    SeqHalvConfig sh_ucb1;
+    sh_ucb1.policy        = POLICY_UCB1;
+    sh_ucb1.param_min     = 0.1;
+    sh_ucb1.param_max     = 3.0;
+    sh_ucb1.n_candidates  = 8;   /* 3 rounds: 8→4→2→1 */
+    sh_ucb1.total_budget  = (args->games > 0) ? args->games * 4 : 32;
+    sh_ucb1.time_limit    = 0.2;
+    sh_ucb1.verbose       = args->verbose;
+
+    double sha_cp = seq_halving_tune(&sh_ucb1);
+    printf("Sequential Halving best UCB1 Cp: %.4f\n\n", sha_cp);
+
+    printf("--- Phase 4b: Sequential Halving BAI (PUCT Cpuct) ---\n\n");
+    SeqHalvConfig sh_puct = sh_ucb1;
+    sh_puct.policy = POLICY_PUCT;
+
+    double sha_cpuct = seq_halving_tune(&sh_puct);
+    printf("Sequential Halving best PUCT Cpuct: %.4f\n\n", sha_cpuct);
+
     /* Final summary */
     printf("========================================\n");
     printf("  TUNING RESULTS\n");
-    printf("  Best UCB1 Cp:    %.4f\n", best_cp);
-    printf("  Best PUCT Cpuct: %.4f\n", best_cpuct);
+    printf("  GA   UCB1 Cp:         %.4f\n", best_cp);
+    printf("  GA   PUCT Cpuct:      %.4f\n", best_cpuct);
+    printf("  SHA  UCB1 Cp:         %.4f\n", sha_cp);
+    printf("  SHA  PUCT Cpuct:      %.4f\n", sha_cpuct);
     printf("========================================\n");
+
+    if (args->output_file) {
+        FILE *f = fopen(args->output_file, "w");
+        if (f) {
+            fprintf(f, "algorithm,policy,best_param\n");
+            fprintf(f, "GA,UCB1,%.4f\n", best_cp);
+            fprintf(f, "GA,PUCT,%.4f\n", best_cpuct);
+            fprintf(f, "Sequential_Halving,UCB1,%.4f\n", sha_cp);
+            fprintf(f, "Sequential_Halving,PUCT,%.4f\n", sha_cpuct);
+            fclose(f);
+        }
+    }
 
     return 0;
 }
@@ -376,7 +431,7 @@ static int run_tests(void) {
 
         MCTSSearch search;
         mcts_init(&search, &cfg);
-        Move m = mcts_search(&search, &s);
+        Move m = mcts_search(&search, &s, NULL);
         mcts_destroy(&search);
 
         printf("Test 9 - MCTS produces a move (%d->%d) ... ", m.from, m.to);

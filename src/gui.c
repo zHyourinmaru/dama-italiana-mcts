@@ -27,6 +27,7 @@ static void gui_new_game(GUIApp *app) {
     app->last_from = -1;
     app->last_to = -1;
     app->ai_thinking = false;
+    app->ai_last_stats[0] = '\0';
 }
 
 static void gui_update_ai_config(GUIApp *app) {
@@ -119,8 +120,12 @@ static void gui_render(GUIApp *app) {
     } else {
         const char *turn = (app->state.turn == WHITE) ? "White" : "Black";
         bool is_human = (app->state.turn == app->human_side);
-        snprintf(status, sizeof(status), "%s's turn %s",
-                 turn, is_human ? "(your move)" : "(AI)");
+        if (is_human && app->ai_last_stats[0] != '\0') {
+            snprintf(status, sizeof(status), "%s's turn (your move) | %s", turn, app->ai_last_stats);
+        } else {
+            snprintf(status, sizeof(status), "%s's turn %s",
+                     turn, is_human ? "(your move)" : "(AI)");
+        }
     }
     r->draw_status(r, status);
     r->draw_thinking(r, app->ai_thinking);
@@ -186,7 +191,15 @@ static void gui_ai_turn(GUIApp *app) {
     app->ai_thinking = true;
     gui_render(app);  /* Show "thinking" state before blocking */
 
-    Move best = mcts_search(&app->search, &app->state);
+    Move best = mcts_search(&app->search, &app->state, &app->history);
+    
+    MCTSStats stats = mcts_get_stats(&app->search);
+    snprintf(app->ai_last_stats, sizeof(app->ai_last_stats),
+             "AI: %u sims | winrate %.1f%% | %.1fs",
+             (unsigned int)stats.simulations,
+             (double)stats.best_winrate * 100.0,
+             stats.elapsed);
+             
     app->ai_thinking = false;
 
     gui_apply_move(app, &best);

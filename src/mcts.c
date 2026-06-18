@@ -13,6 +13,7 @@
 #include "bitboard.h"
 #include "movegen.h"
 #include "game.h"
+#include "rng.h"
 
 #include <math.h>
 #include <string.h>
@@ -53,23 +54,6 @@ MCTSConfig mcts_default_config(void) {
     return cfg;
 }
 
-/* ------------------------------------------------------------------ */
-/*  Fast RNG for rollouts                                              */
-/* ------------------------------------------------------------------ */
-
-static inline uint64_t xorshift64(uint64_t *s) {
-    uint64_t x = *s;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *s = x;
-    return x;
-}
-
-/* Random int in [0, n) */
-static inline int rand_int(uint64_t *rng, int n) {
-    return (int)(xorshift64(rng) % (uint64_t)n);
-}
 
 /* ------------------------------------------------------------------ */
 /*  Node operations                                                    */
@@ -174,8 +158,65 @@ static bool expand_node(MCTSSearch *search, MCTSNode *node,
 /*
  * Fast rollout: no state cloning (uses stack copy), heuristic termination.
  *
+ * Move selection uses a BIASED policy instead of pure random:
+ *   - Captures are already mandatory (generate_moves enforces them), so
+ *     when the move list contains captures all moves are captures — no
+ *     extra logic is needed to prefer them.
+ *   - Among quiet moves, forward steps (toward promotion) are weighted 3x
+ *     vs backward steps (weight 1). King moves are weighted uniformly.
+ *
+ * This lightweight bias dramatically reduces the draw rate caused by
+ * fully-random rollouts wandering without progress, as required by the spec.
+ *
  * Returns score from WHITE's perspective: 1.0 = white wins, 0.0 = black, 0.5 = draw
  */
+
+/* Weighted move selection for rollout.
+ * Assigns each move an integer weight and samples proportionally using
+ * a single random number — O(n) with no extra allocation. */
+static int rollout_pick_move(uint64_t *rng, const Move *moves, int n,
+                             Color turn) {
+    /* Fast path: nothing to choose */
+    if (n == 1) return 0;
+
+    /* If moves are captures (n_captures > 0 on first move) use uniform
+     * selection — all captures are already priority-filtered by generate_moves,
+     * so they are equally desirable at the rollout level. */
+    if (moves[0].n_captures > 0)
+        return rand_int(rng, n);
+
+    /* Quiet moves: assign weights.
+     *   forward step  → weight 3   (toward promotion row)
+     *   backward step → weight 1
+     *   king move     → weight 2   (neutral: kings don't have a clear direction)
+     */
+    int weights[MAX_MOVES];
+    int total = 0;
+    for (int i = 0; i < n; i++) {
+        int w;
+        if (moves[i].is_king_move) {
+            w = 2;
+        } else {
+            int from_row = sq_to_row(moves[i].from);
+            int to_row   = sq_to_row(moves[i].to);
+            bool forward = (turn == WHITE) ? (to_row > from_row)
+                                           : (to_row < from_row);
+            w = forward ? 3 : 1;
+        }
+        weights[i] = w;
+        total += w;
+    }
+
+    /* Sample: pick a threshold in [0, total) then walk the weight array */
+    int r = (int)(xorshift64(rng) % (uint64_t)total);
+    int acc = 0;
+    for (int i = 0; i < n - 1; i++) {
+        acc += weights[i];
+        if (r < acc) return i;
+    }
+    return n - 1;
+}
+
 static float rollout(MCTSSearch *search, GameState state) {
     Move moves[MAX_MOVES];
     int depth = 0;
@@ -205,19 +246,13 @@ static float rollout(MCTSSearch *search, GameState state) {
             return 0.5f;
         }
 
-        /* 1K vs 1K → draw */
-        if (popcount32(state.wp) == 1 && popcount32(state.bp) == 1 &&
-            (state.k & state.wp) && (state.k & state.bp)) {
+        /* No-progress cutoff (matches game_result rule) */
+        if (state.no_progress >= NO_PROGRESS_DRAW) {
             return 0.5f;
         }
 
-        /* No-progress cutoff */
-        if (state.no_progress >= 60) {
-            return 0.5f;
-        }
-
-        /* Pick random move */
-        int idx = rand_int(&search->rng_state, n);
+        /* Pick move using biased rollout policy */
+        int idx = rollout_pick_move(&search->rng_state, moves, n, state.turn);
         game_make_move_fast(&state, &moves[idx]);
         depth++;
     }
@@ -232,49 +267,42 @@ static float rollout(MCTSSearch *search, GameState state) {
 /* ------------------------------------------------------------------ */
 /*  Backpropagation                                                    */
 /* ------------------------------------------------------------------ */
-
 static void backpropagate(MCTSNode *node, float result, Color root_turn) {
     /*
-     * Walk from leaf back to root.
+     * Walk from leaf back to root in two O(depth) passes (total O(2*depth)):
+     *   Pass 1: count depth to determine the leaf's mover parity.
+     *   Pass 2: walk up, updating n and w with alternating perspective.
      *
-     * Each node stores w/n from the perspective of the side that CHOSE
-     * the move leading to this node (i.e. the parent's turn at the time).
-     *
-     * At each depth d from root:
-     *   - even depth → root_turn moved to reach this node
-     *   - odd depth  → opponent moved to reach this node
-     *
-     * We count depth by walking up and alternating perspective.
-     * The leaf is the deepest, and tree depth increases by 1 at each child level.
+     * `result` is from WHITE's perspective (1.0 = white wins, 0.0 = black).
+     * Each node stores w from the perspective of the side that chose the move
+     * leading INTO this node (i.e. the parent's turn at that moment).
      */
+    float root_score = (root_turn == WHITE) ? result : (1.0f - result);
 
-    /* First, count depth of the leaf from root */
+    /* Pass 1: count depth from root */
     int depth = 0;
     for (MCTSNode *p = node; p->parent != NULL; p = p->parent)
         depth++;
 
-    /* Now walk up from leaf to root */
+    /* Pass 2: update — flip perspective at each level */
+    bool mover_is_root = ((depth % 2) == 1);
     MCTSNode *cur = node;
-    int d = depth;
     while (cur != NULL) {
         cur->n++;
         if (cur->parent != NULL) {
-            /* d is the depth of this node. At depth d, the move was made by:
-             *   depth 1: root_turn, depth 2: opponent, depth 3: root_turn, ... */
-            Color mover = ((d % 2) == 1) ? root_turn : OPPONENT(root_turn);
-            float score = (mover == WHITE) ? result : (1.0f - result);
-            cur->w += score;
+            cur->w += mover_is_root ? root_score : (1.0f - root_score);
         }
+        mover_is_root = !mover_is_root;
         cur = cur->parent;
-        d--;
     }
 }
+
 
 /* ------------------------------------------------------------------ */
 /*  Main MCTS search loop                                              */
 /* ------------------------------------------------------------------ */
 
-Move mcts_search(MCTSSearch *search, const GameState *state) {
+Move mcts_search(MCTSSearch *search, const GameState *state, const HashHistory *history) {
     double start_time = get_time_sec();
     double deadline = start_time + search->cfg.time_limit;
 
@@ -310,9 +338,46 @@ Move mcts_search(MCTSSearch *search, const GameState *state) {
         MCTSNode *node = search->root;
         GameState sim = *state;  /* one copy per iteration */
 
+        /* Track path hashes to detect repetitions during selection */
+        uint64_t path_hashes[MAX_PLY];
+        int path_len = 0;
+        path_hashes[path_len++] = sim.hash;
+        bool is_repetition_draw = false;
+
         while (node->n_children > 0 && node->n_untried == 0) {
             node = select_child(search, node);
             game_make_move_fast(&sim, &node->move);
+
+            if (path_len < MAX_PLY) {
+                path_hashes[path_len++] = sim.hash;
+            }
+
+            /* Count occurrences of sim.hash */
+            int rep_count = 0;
+            if (history) {
+                rep_count += hash_history_count(history, sim.hash);
+            }
+            for (int i = 0; i < path_len; i++) {
+                if (path_hashes[i] == sim.hash) {
+                    rep_count++;
+                }
+            }
+
+            /* If it has appeared 3 times in total (real history + current path), it's a draw */
+            if (rep_count >= 3) {
+                is_repetition_draw = true;
+                break;
+            }
+        }
+
+        float result = 0.5f;
+
+        if (is_repetition_draw) {
+            result = 0.5f;
+            backpropagate(node, result, state->turn);
+            iter++;
+            search->total_simulations++;
+            continue;
         }
 
         /* --- Expansion --- */
@@ -359,7 +424,7 @@ Move mcts_search(MCTSSearch *search, const GameState *state) {
         }
 
         /* --- Simulation (rollout) --- */
-        float result = rollout(search, sim);
+        result = rollout(search, sim);
 
         /* --- Backpropagation --- */
         backpropagate(node, result, state->turn);
